@@ -1,0 +1,10 @@
+[package]
+name = "rust-reactive"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[[bin]]
+name = "rust-reactive"
+path = "main.rs"
