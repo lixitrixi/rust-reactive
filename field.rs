@@ -1,122 +1,92 @@
-use std::cell::RefCell;
+use std::cell::{Cell, Ref, RefCell};
 use std::rc::{Rc, Weak};
 
-// TODO: these can be RwLocks for thread safety
-type WeakFlag = Weak<RefCell<bool>>;
-type RcFlag = Rc<RefCell<bool>>;
+pub struct Field<'a, T> {
+    cache: Rc<RefCell<Option<T>>>,
 
-pub struct Field<T, F>
-where
-    F: Fn() -> T,
-{
-    value: Value<T, F>,
+    compute_fn: Box<dyn Fn() -> T + 'a>,
 
-    /// Clean flags for values which depend on this field.
-    dependents: Vec<WeakFlag>,
+    /// A flag indicating whether the currently cached value is still valid.
+    /// Dependencies are given a weak ref to this field to set when they change.
+    clean: Rc<Cell<bool>>,
+
+    /// Clean flags for fields which depend on this field.
+    dependents: Vec<Weak<Cell<bool>>>,
 }
 
-impl<T, F> Field<T, F>
-where
-    F: Fn() -> T,
-{
+impl<'a, T> Field<'a, T> {
+    pub fn get(&self) -> Ref<T> {
+        self.refresh();
+        Ref::map(self.cache.borrow(), |v| {
+            v.as_ref().expect("Value empty after refresh")
+        })
+    }
+
+    pub fn set(&mut self, new_val: T) {
+        *self.cache.borrow_mut() = Some(new_val);
+        self.invalidate_downstream();
+    }
+
+    /// If dirty, recompute the cache value.
+    fn refresh(&self) {
+        if !self.clean.get() {
+            *self.cache.borrow_mut() = Some((self.compute_fn)());
+            self.clean.set(true);
+        }
+    }
+
+    pub fn add_dependent(&mut self, flag: Weak<Cell<bool>>) {
+        self.dependents.push(flag)
+    }
+
     /// Mark all existing dependents as dirty and remove nonexisting ones
     pub fn invalidate_downstream(&mut self) {
         self.dependents.retain(|weak| {
             let opt = weak.upgrade();
             if let Some(rc) = &opt {
-                *rc.borrow_mut() = false;
+                rc.set(false);
             }
             opt.is_some()
         })
     }
 
-    pub fn set(&mut self, new_val: T) {
-        self.value.set(new_val);
-        self.invalidate_downstream();
+    /// Given a flag to invalidate on changes, return a weak reference to this field's value.
+    pub fn exchange(&mut self, flag: Weak<Cell<bool>>) -> Weak<RefCell<Option<T>>> {
+        self.add_dependent(flag);
+
+        // TODO: this allows mutating the inner value.
+        Rc::downgrade(&self.cache)
     }
 
-    pub fn new(value: Value<T, F>) -> Self {
+    /// Construct a new field with a given value and no dependencies.
+    pub fn known(val: T) -> Self {
         Field {
-            value,
+            cache: Rc::new(RefCell::new(Some(val))),
+            compute_fn: Box::new(|| panic!("Cannot compute a known value")),
+            clean: Rc::new(Cell::new(true)),
             dependents: vec![],
         }
     }
 
-    /// Construct a new known field with no dependents.
-    pub fn known(val: T) -> Self {
-        Field::new(Value::Known(val))
-    }
+    pub fn computed<'dep, D: 'a>(
+        dependency: &'dep mut Field<'a, D>,
+        compute_fn: impl Fn(&D) -> T + 'a,
+    ) -> Self {
+        // Start off dirty and compute on the first get
+        let flag = Rc::new(Cell::new(false));
 
-    /// Create a new shared flag for use in computed fields.
-    pub fn get_shared_flag(&mut self) -> RcFlag {
-        // TODO: When is this useful?
-        // Always start as dirty; compute lazily on first get
-        let flag = Rc::new(RefCell::new(false));
-        self.dependents.push(Rc::downgrade(&flag));
-        flag
-    }
-
-    pub fn add_dependent(&mut self, flag: WeakFlag) {
-        self.dependents.push(flag)
-    }
-}
-
-pub enum Value<T, F>
-where
-    F: Fn() -> T,
-{
-    Known(T),
-    Computed(Computed<T, F>),
-}
-
-impl<T, F> Value<T, F>
-where
-    F: Fn() -> T,
-{
-    pub fn get(&mut self) -> &T {
-        match self {
-            Value::Known(val) => val,
-            Value::Computed(comp) => comp.get(),
+        let weak = dependency.exchange(Rc::downgrade(&flag));
+        Field {
+            cache: Rc::new(RefCell::new(None)),
+            compute_fn: Box::new(move || {
+                let rc = weak.upgrade().expect("Dependency has been dropped");
+                let ref_opt = rc.borrow();
+                let d_ref = ref_opt.as_ref().expect("Empty value used for compute");
+                compute_fn(d_ref)
+            }),
+            clean: flag,
+            dependents: vec![],
         }
-    }
-
-    pub fn set(&mut self, new_val: T) {
-        match self {
-            Value::Known(val) => *val = new_val,
-            Value::Computed(val) => val.set(new_val),
-        }
-    }
-}
-
-pub struct Computed<T, F>
-where
-    F: Fn() -> T,
-{
-    compute_fn: F,
-
-    // TODO: make this an Option<T> for new instances
-    cache: T,
-    clean: Rc<RefCell<bool>>,
-}
-
-impl<T, F> Computed<T, F>
-where
-    F: Fn() -> T,
-{
-    // TODO: make a constructor which accepts some fields and a function over them!
-    // Maybe use tuples overloading (A), (A,B), etc. like Bevy?
-
-    pub fn get(&mut self) -> &T {
-        if !(*self.clean.borrow()) {
-            self.cache = (self.compute_fn)();
-            *self.clean.borrow_mut() = true;
-        }
-        &self.cache
-    }
-
-    pub fn set(&mut self, new_val: T) {
-        // TODO: this could overwrite with a wrong value; is this even valid?
-        self.cache = new_val
     }
 }
 
@@ -125,34 +95,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn very_manual_connection() {
-        let known: Field<_, fn() -> bool> = Field::known(true);
-        let known_rc = Rc::new(RefCell::new(known));
+    fn single_dependent_computed() {
+        let mut known = Field::known(false);
+        let computed = Field::computed(&mut known, |b| *b);
 
-        let clean_flag = Rc::new(RefCell::new(false));
-        known_rc
-            .borrow_mut()
-            .add_dependent(Rc::downgrade(&clean_flag));
+        assert!(!*computed.get());
+        known.set(true);
+        assert!(*computed.get());
+    }
 
-        let compute_fn = {
-            let known_rc = Rc::clone(&known_rc);
-            move || *known_rc.borrow_mut().value.get()
-        };
+    #[test]
+    fn dependent_computed_in_sequence() {
+        let mut known = Field::known(false);
+        let mut computed1 = Field::computed(&mut known, |b| *b);
+        let computed2 = Field::computed(&mut computed1, |b| *b);
 
-        // Just mirror the known field
-        let mut computed = Field {
-            value: Value::Computed(Computed {
-                compute_fn,
-                cache: false,
-                clean: clean_flag,
-            }),
-            dependents: vec![],
-        };
-
-        assert_eq!(*computed.value.get(), true);
-
-        known_rc.borrow_mut().set(false);
-
-        assert_eq!(*computed.value.get(), false);
+        assert!(!*computed2.get());
+        known.set(true);
+        assert!(*computed2.get());
     }
 }
