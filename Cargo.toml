@@ -7,4 +7,4 @@ edition = "2024"
 
 [[bin]]
 name = "rust-reactive"
-path = "main.rs"
+path = "src/main.rs"
