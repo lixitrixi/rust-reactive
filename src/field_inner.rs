@@ -24,11 +24,14 @@ impl<T: Copy> FieldInner<T> {
 
     pub fn set(&mut self, val: T) {
         // TODO: semantics when this is a computed value?
+        // Idea: drop the current depen to cut off from dependencies
         self.value = Some(val);
-        self.depen.borrow_mut().invalidate_dependents();
+        let mut depen = self.depen.borrow_mut();
+        depen.invalidate_dependents();
+        depen.set_clean(true);
     }
 
-    pub fn refresh(&mut self) {
+    fn refresh(&mut self) {
         if self.depen.borrow().is_dirty() {
             self.value = Some((self.producer)());
             self.depen.borrow_mut().set_clean(true);
