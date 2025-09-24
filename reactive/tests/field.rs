@@ -22,7 +22,7 @@ fn single_transitive_dependent() {
 }
 
 #[test]
-fn multiple_dependents() {
+fn two_dependents() {
     let mut bool_a = Field::new((), || false);
     let mut bool_b = Field::new((), || false);
     let xor = Field::new((&bool_a, &bool_b), |a, b| a ^ b);
@@ -32,4 +32,20 @@ fn multiple_dependents() {
     assert!(xor.get());
     bool_b.set(true);
     assert!(!xor.get());
+}
+
+#[test]
+fn three_dependents() {
+    let mut int_a = Field::new((), || 0);
+    let mut int_b = Field::new((), || 0);
+    let mut int_c = Field::new((), || 0);
+    let sum = Field::new((&int_a, &int_b, &int_c), |a, b, c| a + b + c);
+
+    assert_eq!(sum.get(), 0);
+    int_a.set(1);
+    assert_eq!(sum.get(), 1);
+    int_b.set(1);
+    assert_eq!(sum.get(), 2);
+    int_c.set(1);
+    assert_eq!(sum.get(), 3);
 }

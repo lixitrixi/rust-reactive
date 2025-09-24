@@ -24,7 +24,7 @@ impl<T: Copy> FieldInner<T> {
 
     pub fn set(&mut self, val: T) {
         // TODO: semantics when this is a computed value?
-        // Idea: drop the current depen to cut off from dependencies
+        // Idea: drop the current depen and dependencies will forget it
         self.value = Some(val);
         let mut depen = self.depen.borrow_mut();
         depen.invalidate_dependents();
